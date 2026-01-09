@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">RoadSensorRecorder</string>
+    <string name="no_sensors_or_location">No sensors or location provider available</string>
+    <string name="location_permission_required">Location permission required for recording</string>
+    <string name="no_sensors_or_location_short">No sensors or location available</string>
+    <string name="recording_started">Recording started</string>
+    <string name="failed_create_file">Failed to create file</string>
+    <string name="recording_saved">Recording saved</string>
+    <string name="recording_in_progress">Recording in progress</string>
+    <string name="stop">Stop</string>
 </resources>

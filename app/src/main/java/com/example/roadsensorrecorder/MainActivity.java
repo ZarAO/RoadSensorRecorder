@@ -1,12 +1,9 @@
 package com.example.roadsensorrecorder;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.hardware.*;
-import android.location.*;
 import android.os.Bundle;
-import android.os.Environment;
-import android.view.View;
 import android.widget.Button;
 import android.widget.Toast;
 
@@ -14,21 +11,11 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import java.io.*;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
+public class MainActivity extends AppCompatActivity {
 
-public class MainActivity extends AppCompatActivity implements SensorEventListener, LocationListener {
-
-    private SensorManager sensorManager;
-    private Sensor accelerometer, gyroscope;
-    private LocationManager locationManager;
     private boolean isRecording = false;
-
-    private FileWriter fileWriter;
-
     private Button startButton, stopButton;
+    private static final int REQ_PERMS = 100;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,102 +25,72 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         startButton = findViewById(R.id.startButton);
         stopButton = findViewById(R.id.stopButton);
 
-        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-
-        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
-
         checkPermissions();
 
         startButton.setOnClickListener(v -> startRecording());
         stopButton.setOnClickListener(v -> stopRecording());
+
+        updateButtons(false);
     }
 
     private void checkPermissions() {
-        String[] permissions = {
+        String[] permissions = new String[] {
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                Manifest.permission.READ_EXTERNAL_STORAGE
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
         };
-        ActivityCompat.requestPermissions(this, permissions, 100);
+
+        boolean hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean hasBg = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
+
+        if (!hasFine || !hasCoarse || !hasBg) {
+            ActivityCompat.requestPermissions(this, permissions, REQ_PERMS);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_PERMS) {
+            boolean granted = true;
+            for (int r : grantResults) {
+                if (r != PackageManager.PERMISSION_GRANTED) {
+                    granted = false;
+                    break;
+                }
+            }
+            if (!granted) {
+                Toast.makeText(this, getString(R.string.location_permission_required), Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 
     private void startRecording() {
+        Intent i = new Intent(this, RecordingService.class);
+        i.setAction(RecordingService.ACTION_START);
+        ContextCompat.startForegroundService(this, i);
         isRecording = true;
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
-
-        try {
-            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-            File file = new File(getExternalFilesDir(null), "sensor_data_" + timestamp + ".csv");
-            fileWriter = new FileWriter(file);
-            fileWriter.write("Time,Type,X,Y,Z,Latitude,Longitude\n");
-        } catch (IOException e) {
-            e.printStackTrace();
-            Toast.makeText(this, "Failed to create file", Toast.LENGTH_SHORT).show();
-        }
-
-        sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
-        sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME);
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 500, 0, this);
-        }
+        updateButtons(true);
     }
 
     private void stopRecording() {
+        Intent i = new Intent(this, RecordingService.class);
+        i.setAction(RecordingService.ACTION_STOP);
+        startService(i);
         isRecording = false;
-        startButton.setEnabled(true);
-        stopButton.setEnabled(false);
+        updateButtons(false);
+    }
 
-        sensorManager.unregisterListener(this);
-        locationManager.removeUpdates(this);
-
-        try {
-            if (fileWriter != null) {
-                fileWriter.flush();
-                fileWriter.close();
-                Toast.makeText(this, "Recording saved", Toast.LENGTH_SHORT).show();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+    private void updateButtons(boolean recording) {
+        runOnUiThread(() -> {
+            startButton.setEnabled(!recording);
+            stopButton.setEnabled(recording);
+        });
     }
 
     @Override
-    public void onSensorChanged(SensorEvent event) {
-        if (!isRecording || fileWriter == null) return;
-
-        String type = event.sensor.getType() == Sensor.TYPE_ACCELEROMETER ? "Accelerometer" : "Gyroscope";
-        String line = System.currentTimeMillis() + "," + type + "," +
-                event.values[0] + "," +
-                event.values[1] + "," +
-                event.values[2] + ",,\n";
-        writeToFile(line);
+    protected void onDestroy() {
+        super.onDestroy();
     }
-
-    @Override
-    public void onLocationChanged(Location location) {
-        if (!isRecording || fileWriter == null) return;
-
-        String line = System.currentTimeMillis() + ",Location,,," +
-                "," + location.getLatitude() + "," + location.getLongitude() + "\n";
-        writeToFile(line);
-    }
-
-    private void writeToFile(String line) {
-        try {
-            fileWriter.write(line);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
-    @Override public void onProviderEnabled(String provider) {}
-    @Override public void onProviderDisabled(String provider) {}
-    @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
 }
