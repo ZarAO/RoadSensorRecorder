@@ -1,11 +1,15 @@
 package com.example.roadsensorrecorder;
 
 import android.Manifest;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.Toast;
 
@@ -16,11 +20,39 @@ import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
 
+    private static final String TAG = "MainActivity";
+
     private boolean isRecording = false;
     private Button startButton, stopButton;
     private static final int REQ_PERMS = 100;
     // If user triggers start but permissions are missing, remember to start after grant
     private boolean pendingStartRequest = false;
+
+    private final BroadcastReceiver recordingStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || intent.getAction() == null) return;
+            String action = intent.getAction();
+            Log.i(TAG, "Broadcast received: " + action);
+            switch (action) {
+                case RecordingService.ACTION_RECORDING_STARTED:
+                    Log.i(TAG, "Received ACTION_RECORDING_STARTED");
+                    isRecording = true;
+                    updateButtons(true);
+                    break;
+                case RecordingService.ACTION_RECORDING_STOPPED:
+                    Log.i(TAG, "Received ACTION_RECORDING_STOPPED");
+                    isRecording = false;
+                    updateButtons(false);
+                    break;
+                case RecordingService.ACTION_NOTIFICATION_STOP:
+                    Log.i(TAG, "Received ACTION_NOTIFICATION_STOP (from notification)");
+                    // User tapped Stop in notification; trigger stop flow to update UI immediately
+                    stopRecording();
+                    break;
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,6 +78,41 @@ public class MainActivity extends AppCompatActivity {
             // small delay not necessary; just attempt to start again which will re-check permissions
             startRecording();
         }
+        // Register receiver to update UI when service broadcasts start/stop
+        IntentFilter f = new IntentFilter();
+        f.addAction(RecordingService.ACTION_RECORDING_STARTED);
+        f.addAction(RecordingService.ACTION_RECORDING_STOPPED);
+        // On Android 14+ the registerReceiver API requires an explicit exported flag when
+        // registering for non-system broadcasts. Use RECEIVER_NOT_EXPORTED so only our app
+        // can receive these broadcasts.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            registerReceiver(recordingStateReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(recordingStateReceiver, f);
+        }
+
+        // If the service is already running, ensure UI reflects that (in case broadcast was missed)
+        // Prefer the persistent state saved by the service as the source of truth in case the
+        // activity missed the runtime broadcast (e.g., activity was paused). If it's not present
+        // fall back to the in-memory flag on the service.
+        boolean prefRecording = false;
+        try {
+            prefRecording = getSharedPreferences("app_prefs", Context.MODE_PRIVATE).getBoolean("is_recording", false);
+        } catch (Exception ignored) {}
+
+        if (prefRecording || RecordingService.sIsRunning) {
+            isRecording = true;
+            updateButtons(true);
+        } else {
+            isRecording = false;
+            updateButtons(false);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        try { unregisterReceiver(recordingStateReceiver); } catch (Exception ignored) {}
     }
 
     private void checkPermissions() {

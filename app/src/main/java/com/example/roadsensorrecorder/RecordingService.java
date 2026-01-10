@@ -40,6 +40,14 @@ public class RecordingService extends LifecycleService implements SensorEventLis
 
     public static final String ACTION_START = "com.example.roadsensorrecorder.action.START";
     public static final String ACTION_STOP = "com.example.roadsensorrecorder.action.STOP";
+    // Action fired by notification button (broadcast) so Activity can update UI immediately
+    public static final String ACTION_NOTIFICATION_STOP = "com.example.roadsensorrecorder.action.NOTIF_STOP";
+    // Broadcast actions for activity to observe recording state changes
+    public static final String ACTION_RECORDING_STARTED = "com.example.roadsensorrecorder.action.RECORDING_STARTED";
+    public static final String ACTION_RECORDING_STOPPED = "com.example.roadsensorrecorder.action.RECORDING_STOPPED";
+
+    // Public flag visible to Activity to check whether service is currently recording
+    public static volatile boolean sIsRunning = false;
 
     private static final String CHANNEL_ID = "recording_channel";
     private static final int NOTIFICATION_ID = 1;
@@ -86,9 +94,16 @@ public class RecordingService extends LifecycleService implements SensorEventLis
     }
 
     private Notification buildNotification() {
+        // Create an intent that stops the service when the user taps Stop in the notification.
+        // Use getForegroundService on O+ so the system starts the service as a foreground service.
         Intent stopIntent = new Intent(this, RecordingService.class);
         stopIntent.setAction(ACTION_STOP);
-        PendingIntent stopPending = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stopPending;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            stopPending = PendingIntent.getForegroundService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        } else {
+            stopPending = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        }
 
         Intent activityIntent = new Intent(this, MainActivity.class);
         PendingIntent activityPending = PendingIntent.getActivity(this, 0, activityIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -104,6 +119,7 @@ public class RecordingService extends LifecycleService implements SensorEventLis
     }
 
     private void startRecordingInternal() {
+        Log.i(TAG, "startRecordingInternal: starting recording");
         ioExecutor.execute(() -> {
             try {
                 String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
@@ -115,6 +131,15 @@ public class RecordingService extends LifecycleService implements SensorEventLis
                 Log.e(TAG, "Failed to create file", e);
             }
         });
+
+        // mark service as running
+        sIsRunning = true;
+        // Persist state so Activity can recover UI state even if it missed the broadcast
+        try {
+            getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit().putBoolean("is_recording", true).apply();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to persist recording state (start)", e);
+        }
 
         // Register sensors
         if (accelerometer != null) sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
@@ -136,9 +161,21 @@ public class RecordingService extends LifecycleService implements SensorEventLis
         } catch (SecurityException e) {
             Log.w(TAG, "Location permission missing (caught)", e);
         }
+
+        // Notify activity/app that recording has started so UI can update (e.g. when stopped from notification)
+        try {
+            Intent started = new Intent(ACTION_RECORDING_STARTED);
+            sendBroadcast(started);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to broadcast recording started", e);
+        }
     }
 
     private void stopRecordingInternal() {
+        Log.i(TAG, "stopRecordingInternal: stopping recording");
+        // mark service as not running
+        sIsRunning = false;
+
         if (sensorManager != null) sensorManager.unregisterListener(this);
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback);
@@ -157,11 +194,28 @@ public class RecordingService extends LifecycleService implements SensorEventLis
                 Log.e(TAG, "Error closing file", e);
             }
         });
+
+        // Broadcast that recording stopped so Activity can update its UI
+        try {
+            Intent stopped = new Intent(ACTION_RECORDING_STOPPED);
+            sendBroadcast(stopped);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to broadcast recording stopped", e);
+        }
+        // Persist stopped state as well
+        try {
+            getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit().putBoolean("is_recording", false).apply();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to persist recording state (stop)", e);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         super.onStartCommand(intent, flags, startId);
+
+        String act = intent == null ? "<null>" : intent.getAction();
+        Log.i(TAG, "onStartCommand: action=" + act + " flags=" + flags + " startId=" + startId);
 
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             stopRecordingInternal();

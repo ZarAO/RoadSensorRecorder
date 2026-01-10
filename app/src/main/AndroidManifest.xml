@@ -24,5 +24,10 @@
             </intent-filter>
         </activity>
         <service android:name=".RecordingService" android:exported="false" android:foregroundServiceType="location" />
+        <receiver android:name=".NotificationActionReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.roadsensorrecorder.action.NOTIF_STOP" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
