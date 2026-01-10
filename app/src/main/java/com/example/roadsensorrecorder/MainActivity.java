@@ -16,6 +16,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean isRecording = false;
     private Button startButton, stopButton;
     private static final int REQ_PERMS = 100;
+    // If user triggers start but permissions are missing, remember to start after grant
+    private boolean pendingStartRequest = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,11 +64,27 @@ public class MainActivity extends AppCompatActivity {
             }
             if (!granted) {
                 Toast.makeText(this, getString(R.string.location_permission_required), Toast.LENGTH_SHORT).show();
+            } else {
+                // If user granted permissions and previously attempted to start recording, start now
+                if (pendingStartRequest) {
+                    pendingStartRequest = false;
+                    startRecording();
+                }
             }
         }
     }
 
     private void startRecording() {
+        // Ensure we have at least one foreground location permission before starting FG service
+        boolean hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        if (!hasFine && !hasCoarse) {
+            // Request permissions and remember to start after grant
+            pendingStartRequest = true;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_PERMS);
+            Toast.makeText(this, getString(R.string.location_permission_required), Toast.LENGTH_SHORT).show();
+            return;
+        }
         Intent i = new Intent(this, RecordingService.class);
         i.setAction(RecordingService.ACTION_START);
         ContextCompat.startForegroundService(this, i);

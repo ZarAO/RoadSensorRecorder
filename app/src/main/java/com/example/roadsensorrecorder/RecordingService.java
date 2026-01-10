@@ -17,6 +17,7 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleService;
 
 import com.google.android.gms.location.FusedLocationProviderClient;
@@ -119,21 +120,31 @@ public class RecordingService extends LifecycleService implements SensorEventLis
         if (accelerometer != null) sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
         if (gyroscope != null) sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME);
 
-        // Request location updates
+        // Request location updates - only if we have location permission
         try {
-            LocationRequest req = LocationRequest.create();
-            req.setInterval(1000);
-            req.setFastestInterval(500);
-            req.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
-            fusedLocationClient.requestLocationUpdates(req, locationCallback, getMainLooper());
+            boolean hasFine = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            boolean hasCoarse = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (hasFine || hasCoarse) {
+                LocationRequest req = LocationRequest.create();
+                req.setInterval(1000);
+                req.setFastestInterval(500);
+                req.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+                fusedLocationClient.requestLocationUpdates(req, locationCallback, getMainLooper());
+            } else {
+                Log.w(TAG, "Skipping location updates because no location permission granted");
+            }
         } catch (SecurityException e) {
-            Log.w(TAG, "Location permission missing", e);
+            Log.w(TAG, "Location permission missing (caught)", e);
         }
     }
 
     private void stopRecordingInternal() {
         if (sensorManager != null) sensorManager.unregisterListener(this);
-        fusedLocationClient.removeLocationUpdates(locationCallback);
+        try {
+            fusedLocationClient.removeLocationUpdates(locationCallback);
+        } catch (Exception e) {
+            Log.w(TAG, "Error removing location updates", e);
+        }
 
         ioExecutor.execute(() -> {
             try {
@@ -162,7 +173,15 @@ public class RecordingService extends LifecycleService implements SensorEventLis
         // Start foreground
         startRecordingInternal();
         Notification n = buildNotification();
-        startForeground(NOTIFICATION_ID, n);
+        try {
+            startForeground(NOTIFICATION_ID, n);
+        } catch (SecurityException se) {
+            // This can happen if the service declares location foreground type in manifest but the app
+            // doesn't have the required runtime permission. Handle gracefully: log and continue without
+            // throwing so the app doesn't crash.
+            Log.e(TAG, "Failed to start foreground due to missing permission", se);
+            // Do not rethrow; sensors continue to run but location updates were skipped earlier.
+        }
         return START_NOT_STICKY;
     }
 
