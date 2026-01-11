@@ -15,10 +15,12 @@ import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleService;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationCallback;
@@ -73,8 +75,7 @@ public class RecordingService extends LifecycleService implements SensorEventLis
 
         locationCallback = new LocationCallback() {
             @Override
-            public void onLocationResult(LocationResult locationResult) {
-                if (locationResult == null) return;
+            public void onLocationResult(@NonNull LocationResult locationResult) {
                 for (Location location : locationResult.getLocations()) {
                     writeLocation(location);
                 }
@@ -94,18 +95,19 @@ public class RecordingService extends LifecycleService implements SensorEventLis
     }
 
     private Notification buildNotification() {
-        // Create an intent that stops the service when the user taps Stop in the notification.
-        // Use getForegroundService on O+ so the system starts the service as a foreground service.
-        Intent stopIntent = new Intent(this, RecordingService.class);
-        stopIntent.setAction(ACTION_STOP);
-        PendingIntent stopPending;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            stopPending = PendingIntent.getForegroundService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        } else {
-            stopPending = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        }
+        // The notification Stop action should notify the Activity immediately so the UI updates
+        // without waiting for the service stop broadcast. Use a broadcast PendingIntent that
+        // the Activity listens for (ACTION_NOTIFICATION_STOP). The Activity will then initiate
+        // the service stop flow which ensures the service does its cleanup and broadcasts the
+        // final stopped state as well.
+        Intent notifStopIntent = new Intent(this, MainActivity.class).setAction(ACTION_NOTIFICATION_STOP);
+        // Ensure tapping Stop brings the app to the foreground and delivers the intent to an
+        // existing MainActivity instance when possible.
+        notifStopIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent stopPending = PendingIntent.getActivity(this, 0, notifStopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         Intent activityIntent = new Intent(this, MainActivity.class);
+        activityIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent activityPending = PendingIntent.getActivity(this, 0, activityIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -150,10 +152,11 @@ public class RecordingService extends LifecycleService implements SensorEventLis
             boolean hasFine = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
             boolean hasCoarse = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
             if (hasFine || hasCoarse) {
-                LocationRequest req = LocationRequest.create();
-                req.setInterval(1000);
-                req.setFastestInterval(500);
-                req.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+                // Use new LocationRequest.Builder API (non-deprecated)
+                LocationRequest req = new LocationRequest.Builder(1000)
+                        .setMinUpdateIntervalMillis(500)
+                        .setPriority(com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY)
+                        .build();
                 fusedLocationClient.requestLocationUpdates(req, locationCallback, getMainLooper());
             } else {
                 Log.w(TAG, "Skipping location updates because no location permission granted");
@@ -165,7 +168,7 @@ public class RecordingService extends LifecycleService implements SensorEventLis
         // Notify activity/app that recording has started so UI can update (e.g. when stopped from notification)
         try {
             Intent started = new Intent(ACTION_RECORDING_STARTED);
-            sendBroadcast(started);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(started);
         } catch (Exception e) {
             Log.w(TAG, "Failed to broadcast recording started", e);
         }
@@ -198,7 +201,7 @@ public class RecordingService extends LifecycleService implements SensorEventLis
         // Broadcast that recording stopped so Activity can update its UI
         try {
             Intent stopped = new Intent(ACTION_RECORDING_STOPPED);
-            sendBroadcast(stopped);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(stopped);
         } catch (Exception e) {
             Log.w(TAG, "Failed to broadcast recording stopped", e);
         }
@@ -241,7 +244,7 @@ public class RecordingService extends LifecycleService implements SensorEventLis
 
     @Nullable
     @Override
-    public IBinder onBind(Intent intent) {
+    public IBinder onBind(@NonNull Intent intent) {
         return super.onBind(intent);
     }
 

@@ -13,43 +13,34 @@ import android.util.Log;
 import android.widget.Button;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "MainActivity";
 
-    private boolean isRecording = false;
     private Button startButton, stopButton;
     private static final int REQ_PERMS = 100;
     // If user triggers start but permissions are missing, remember to start after grant
     private boolean pendingStartRequest = false;
 
+    // Local broadcast receiver to listen for recording state changes from the service
     private final BroadcastReceiver recordingStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (intent == null || intent.getAction() == null) return;
             String action = intent.getAction();
-            Log.i(TAG, "Broadcast received: " + action);
-            switch (action) {
-                case RecordingService.ACTION_RECORDING_STARTED:
-                    Log.i(TAG, "Received ACTION_RECORDING_STARTED");
-                    isRecording = true;
-                    updateButtons(true);
-                    break;
-                case RecordingService.ACTION_RECORDING_STOPPED:
-                    Log.i(TAG, "Received ACTION_RECORDING_STOPPED");
-                    isRecording = false;
-                    updateButtons(false);
-                    break;
-                case RecordingService.ACTION_NOTIFICATION_STOP:
-                    Log.i(TAG, "Received ACTION_NOTIFICATION_STOP (from notification)");
-                    // User tapped Stop in notification; trigger stop flow to update UI immediately
-                    stopRecording();
-                    break;
+            Log.i(TAG, "Received broadcast: " + action);
+            if (RecordingService.ACTION_RECORDING_STARTED.equals(action)) {
+                updateButtons(true);
+            } else if (RecordingService.ACTION_RECORDING_STOPPED.equals(action)) {
+                updateButtons(false);
             }
         }
     };
@@ -62,10 +53,22 @@ public class MainActivity extends AppCompatActivity {
         startButton = findViewById(R.id.startButton);
         stopButton = findViewById(R.id.stopButton);
 
-        checkPermissions();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            checkPermissions();
+        }
 
-        startButton.setOnClickListener(v -> startRecording());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            startButton.setOnClickListener(v -> startRecording());
+        }
         stopButton.setOnClickListener(v -> stopRecording());
+
+        // Handle the case where the Activity was launched from the notification Stop action.
+        Intent starting = getIntent();
+        if (starting != null && RecordingService.ACTION_NOTIFICATION_STOP.equals(starting.getAction())) {
+            Log.i(TAG, "Launched with ACTION_NOTIFICATION_STOP - stopping recording");
+            stopRecording();
+        }
+
 
         updateButtons(false);
     }
@@ -73,48 +76,49 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+
+        // Register local broadcast receiver to get immediate updates from service
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(RecordingService.ACTION_RECORDING_STARTED);
+        filter.addAction(RecordingService.ACTION_RECORDING_STOPPED);
+        LocalBroadcastManager.getInstance(this).registerReceiver(recordingStateReceiver, filter);
+
         // If user was sent to settings to enable notifications or permissions, resume pending start
         if (pendingStartRequest) {
-            // small delay not necessary; just attempt to start again which will re-check permissions
-            startRecording();
-        }
-        // Register receiver to update UI when service broadcasts start/stop
-        IntentFilter f = new IntentFilter();
-        f.addAction(RecordingService.ACTION_RECORDING_STARTED);
-        f.addAction(RecordingService.ACTION_RECORDING_STOPPED);
-        // On Android 14+ the registerReceiver API requires an explicit exported flag when
-        // registering for non-system broadcasts. Use RECEIVER_NOT_EXPORTED so only our app
-        // can receive these broadcasts.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            registerReceiver(recordingStateReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(recordingStateReceiver, f);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                startRecording();
+            }
+            return;
         }
 
-        // If the service is already running, ensure UI reflects that (in case broadcast was missed)
-        // Prefer the persistent state saved by the service as the source of truth in case the
-        // activity missed the runtime broadcast (e.g., activity was paused). If it's not present
-        // fall back to the in-memory flag on the service.
+        // Restore UI state from persisted preferences (in case service is already running)
         boolean prefRecording = false;
         try {
             prefRecording = getSharedPreferences("app_prefs", Context.MODE_PRIVATE).getBoolean("is_recording", false);
         } catch (Exception ignored) {}
 
-        if (prefRecording || RecordingService.sIsRunning) {
-            isRecording = true;
-            updateButtons(true);
-        } else {
-            isRecording = false;
-            updateButtons(false);
-        }
+        updateButtons(prefRecording);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        try { unregisterReceiver(recordingStateReceiver); } catch (Exception ignored) {}
+        // Unregister local broadcast receiver
+        try {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(recordingStateReceiver);
+        } catch (Exception ignored) {}
     }
 
+    @Override
+    protected void onNewIntent(@NonNull Intent intent) {
+        super.onNewIntent(intent);
+        if (RecordingService.ACTION_NOTIFICATION_STOP.equals(intent.getAction())) {
+            Log.i(TAG, "onNewIntent: ACTION_NOTIFICATION_STOP received - stopping recording");
+            stopRecording();
+        }
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.TIRAMISU)
     private void checkPermissions() {
         // Base permissions
         String[] permissions = new String[] {
@@ -127,11 +131,9 @@ public class MainActivity extends AppCompatActivity {
         boolean hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
         boolean hasBg = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
 
-        boolean needNotifications = false;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // POST_NOTIFICATIONS required on Android 13+
-            needNotifications = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
-        }
+        boolean needNotifications;
+        // POST_NOTIFICATIONS required on Android 13+
+        needNotifications = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
 
         if (!hasFine || !hasCoarse || !hasBg || needNotifications) {
             if (needNotifications) {
@@ -147,7 +149,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_PERMS) {
             boolean granted = true;
@@ -163,20 +165,21 @@ public class MainActivity extends AppCompatActivity {
                 // If user granted permissions and previously attempted to start recording, start now
                 if (pendingStartRequest) {
                     pendingStartRequest = false;
-                    startRecording();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        startRecording();
+                    }
                 }
             }
         }
     }
 
+    @RequiresApi(api = Build.VERSION_CODES.TIRAMISU)
     private void startRecording() {
         // Ensure we have at least one foreground location permission before starting FG service
         boolean hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
         boolean hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
-        boolean hasNotifications = true;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            hasNotifications = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
-        }
+        boolean hasNotifications;
+        hasNotifications = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
 
         // Additionally check whether system notifications are enabled for this app (user can block them)
         boolean areNotificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled();
@@ -185,15 +188,10 @@ public class MainActivity extends AppCompatActivity {
             pendingStartRequest = true;
             Toast.makeText(this, getString(R.string.notification_permission_required), Toast.LENGTH_LONG).show();
             Intent intent = new Intent();
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                intent.setAction(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
-                intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
-                // open channel settings directly if supported
-                intent.putExtra("android.provider.extra.CHANNEL_ID", "recording_channel");
-            } else {
-                intent.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                intent.setData(android.net.Uri.parse("package:" + getPackageName()));
-            }
+            intent.setAction(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+            // open channel settings directly if supported
+            intent.putExtra("android.provider.extra.CHANNEL_ID", "recording_channel");
             startActivity(intent);
             return;
         }
@@ -215,15 +213,33 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(this, RecordingService.class);
         i.setAction(RecordingService.ACTION_START);
         ContextCompat.startForegroundService(this, i);
-        isRecording = true;
+        // Persist desired state immediately so lifecycle methods (onResume) reflect user's intent
+        try {
+            getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit()
+                    .putBoolean("is_recording", true)
+                    .putString("last_recording_action", "start")
+                    .putLong("last_recording_action_ts", System.currentTimeMillis())
+                    .apply();
+        } catch (Exception ignored) {}
+        // Update in-memory flag so other parts of the app see the change right away
+        try { RecordingService.sIsRunning = true; } catch (Exception ignored) {}
         updateButtons(true);
     }
 
     private void stopRecording() {
+        // Persist stopped state immediately to avoid a race when onResume() reads the pref
+        try {
+            getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit()
+                    .putBoolean("is_recording", false)
+                    .putString("last_recording_action", "stop")
+                    .putLong("last_recording_action_ts", System.currentTimeMillis())
+                    .apply();
+        } catch (Exception ignored) {}
+        try { RecordingService.sIsRunning = false; } catch (Exception ignored) {}
+
         Intent i = new Intent(this, RecordingService.class);
         i.setAction(RecordingService.ACTION_STOP);
         startService(i);
-        isRecording = false;
         updateButtons(false);
     }
 
